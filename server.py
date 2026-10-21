@@ -18,11 +18,13 @@ from mcp.types import ToolAnnotations
 import accounts
 import mailutil
 import oauth
+import organise
 
 AUTH = oauth.Config.from_env(accounts.BASE)  # exits with a clear message if PUBLIC_HOSTNAME is missing
 PUBLIC_HOSTNAME = AUTH.public_url.removeprefix("https://")
 ALLOW_SEND = os.environ.get("ALLOW_SEND", "true").strip().lower() in ("1", "true", "yes")
 SENT_LOG = accounts.BASE / "sent.log"
+HISTORY = organise.History(accounts.BASE / "state" / "organise.json")
 
 # --- MCP server -------------------------------------------------------------
 
@@ -44,6 +46,7 @@ mcp = FastMCP("gmail", stateless_http=True, json_response=True, **_kwargs)
 READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
 DRAFT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=False)
 SEND = ToolAnnotations(readOnlyHint=False, destructiveHint=False, openWorldHint=True)
+ORGANISE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 
 
 def friendly(fn):
@@ -227,6 +230,68 @@ def read_thread(account: str, thread_id: str, max_chars_per_message: int = 4000)
             "body_truncated": truncated,
         })
     return {"thread_id": thread_id, "messages": messages}
+
+
+# --- Tools: tidying (reversible; nothing is deleted or sent) -----------------
+
+def _user_labels(svc) -> dict:
+    labels = svc.users().labels().list(userId="me").execute().get("labels", [])
+    return {l["name"].lower(): l["id"] for l in labels if l.get("type") == "user"}
+
+
+@mcp.tool(annotations=READ)
+@friendly
+def list_labels(account: str) -> dict:
+    """List the account's own folders (Gmail labels) that mail can be moved to. INBOX, SPAM (also called junk) and ARCHIVE
+    always work as destinations and are not listed."""
+    svc, _ = accounts.get_service(account)
+    return {"folders": sorted(l["name"] for l in svc.users().labels().list(userId="me").execute().get("labels", [])
+                              if l.get("type") == "user")}
+
+
+@mcp.tool(annotations=ORGANISE)
+@friendly
+def create_label(account: str, name: str) -> dict:
+    """Create a new folder (Gmail label), for example 'Suppliers' or 'Invoices/2026'. Does nothing if it already exists."""
+    name = (name or "").strip()
+    if not name or len(name) > 100 or any(ord(c) < 32 for c in name) or name.lower() in organise.REFUSED_WORDS | organise.SPAM_WORDS | {"inbox", "archive"}:
+        raise ValueError("That is not a usable folder name.")
+    svc, _ = accounts.get_service(account)
+    if name.lower() in _user_labels(svc):
+        return {"status": "already exists", "folder": name}
+    svc.users().labels().create(userId="me", body={
+        "name": name, "labelListVisibility": "labelShow", "messageListVisibility": "show"}).execute()
+    return {"status": "created", "folder": name}
+
+
+@mcp.tool(annotations=ORGANISE)
+@friendly
+def move_messages(account: str, message_ids: list[str], to_folder: str) -> dict:
+    """Move up to 25 messages (ids from search_messages) to a folder. to_folder is INBOX, SPAM (also 'junk'), ARCHIVE
+    (just leaves the inbox) or the name of one of the account's own folders (see list_labels). Nothing is deleted and the
+    messages stay recoverable; undo_last_change reverses the latest move. Moving to trash or bin is not possible here."""
+    svc, _ = accounts.get_service(account)
+    ids = organise.check_ids(message_ids)
+    add, remove, nice = organise.resolve_target(to_folder, _user_labels(svc))
+    return organise.apply_changes(svc, HISTORY, account, f"move to {nice}", ids, add, remove)
+
+
+@mcp.tool(annotations=ORGANISE)
+@friendly
+def set_read(account: str, message_ids: list[str], read: bool = True) -> dict:
+    """Mark up to 25 messages as read (read=true) or unread (read=false)."""
+    svc, _ = accounts.get_service(account)
+    ids = organise.check_ids(message_ids)
+    add, remove = ([], ["UNREAD"]) if read else (["UNREAD"], [])
+    return organise.apply_changes(svc, HISTORY, account, "mark read" if read else "mark unread", ids, add, remove)
+
+
+@mcp.tool(annotations=ORGANISE)
+@friendly
+def undo_last_change(account: str) -> dict:
+    """Reverse the most recent move or read/unread change made on this account through this server."""
+    svc, _ = accounts.get_service(account)
+    return organise.undo_last(svc, HISTORY, account)
 
 
 # --- Tools: drafts (safe, nothing leaves the mailbox) ------------------------
