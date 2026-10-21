@@ -19,3 +19,5 @@ client_secret*.json
 tokens/
 auth.json
 *.log
+pubsub-key.json
+*-key.json
