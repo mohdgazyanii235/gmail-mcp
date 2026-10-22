@@ -96,11 +96,22 @@ def flush_pending(alias):
     STATE.save()
 
 
+def is_not_found(e) -> bool:
+    return getattr(getattr(e, "resp", None), "status", None) == 404
+
+
 def handle_ids(svc, alias, ids):
     for mid in ids:
         if STATE.is_handled(alias, mid):
             continue
-        notice = describe(svc, alias, mid)
+        try:
+            notice = describe(svc, alias, mid)
+        except Exception as e:  # noqa: BLE001
+            if is_not_found(e):  # deleted or moved away since Gmail reported it: nothing to announce
+                log.info("%s: message %s no longer exists, skipping", alias, mid)
+                STATE.mark_handled(alias, mid)
+                continue
+            raise
         STATE.mark_handled(alias, mid)
         if notice:
             log.info("new mail from %s (verified=%s)", notice["sender"], notice["verified"])
@@ -175,6 +186,7 @@ def on_message(message):
         message.ack()
     except Exception:
         log.exception("could not process a push message; it will be retried")
+        time.sleep(5)  # do not hammer Google if the problem is persistent
         message.nack()
 
 
