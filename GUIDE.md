@@ -274,3 +274,7 @@ You can now remove the Carly connector and any account you no longer want connec
 **You lost the phone.** On the Pi run `.venv/bin/python manage_auth.py reset-2fa` and set up the new device.
 
 **Claude says the connector's sign-in failed or the redirect was refused.** The server only accepts Claude's official callback addresses. If you are using a different Claude app that uses another one, the error will show it; add it to `.env` as `EXTRA_REDIRECT_URIS=https://that-address` and restart the service.
+
+## Bridge for Command Pi
+
+`bridge.py` is a small local service (127.0.0.1:8767, bearer `BRIDGE_TOKEN`) that lets Command Pi's sandboxed scripts work on mail without ever holding a Google login. It offers accounts, search, read, folders, mark read/unread (one message or a whole search, undoable as one batch), move (to INBOX, SPAM, ARCHIVE or your own folder) and undo. It has no send, no draft and no delete. Install with `./install-bridge.sh`, then run `sudo scripts/connect-bridge.sh` from the command-pi repo. Optional `BRIDGE_ACCOUNTS=personal,sales` limits mailboxes. Tests: `python3 test_organise.py && python3 test_bridge.py`.

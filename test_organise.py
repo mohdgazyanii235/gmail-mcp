@@ -122,6 +122,59 @@ def test_nothing_changed_records_nothing():
     assert h.last("sales") is None and svc.calls == []
 
 
+class ListSvc(FakeSvc):
+    """Adds messages().list with paging, and a minimal get."""
+
+    def list(self, userId, q, maxResults, pageToken=None, includeSpamTrash=False):
+        self.queries = getattr(self, "queries", []) + [q]
+        want = "UNREAD" if "is:unread" in q else None
+        ids = [i for i, l in self.labels.items() if "INBOX" in l and (want is None or want in l)]
+        start = int(pageToken or 0)
+        page = ids[start:start + min(maxResults, 2)]  # tiny pages, to exercise paging
+        nxt = start + len(page)
+        return _Exec({"messages": [{"id": i} for i in page], **({"nextPageToken": str(nxt)} if nxt < len(ids) else {})})
+
+    def get(self, userId, id, format, metadataHeaders=None):
+        return _Exec({"id": id, "labelIds": list(self.labels[id]), "payload": {"headers": []}})
+
+
+def test_bulk_mark_read_all_pages_one_undo():
+    svc = ListSvc({f"m{i}": ["INBOX", "UNREAD"] for i in range(5)} | {"r": ["INBOX"], "x": ["SENT", "UNREAD"]})
+    h = hist()
+    r = o.bulk_mark_read(svc, h, "personal")
+    assert r["changed"] == 5 and not r["more_remaining"]
+    assert all("UNREAD" not in svc.labels[f"m{i}"] for i in range(5))
+    assert "UNREAD" in svc.labels["x"]  # outside the inbox: untouched
+    assert "is:unread" in svc.queries[0] and "in:inbox" in svc.queries[0]
+    assert o.undo_last(svc, h, "personal")["messages"] == 5
+    assert all("UNREAD" in svc.labels[f"m{i}"] for i in range(5))
+
+
+def test_bulk_mark_read_cap_and_nothing_to_do():
+    svc = ListSvc({f"m{i}": ["INBOX", "UNREAD"] for i in range(5)})
+    r = o.bulk_mark_read(svc, hist(), "p", cap=3)
+    assert r["changed"] == 3 and r["more_remaining"]
+    assert o.bulk_mark_read(ListSvc({"a": ["INBOX"]}), hist(), "p")["changed"] == 0
+
+
+def test_bulk_move_needs_a_search_and_is_undoable():
+    svc, h = ListSvc({"a": ["INBOX"], "b": ["INBOX", "UNREAD"]}), hist()
+    try:
+        o.bulk_move(svc, h, "p", "", [], ["INBOX"], "the archive")
+        assert False
+    except ValueError:
+        pass
+    r = o.bulk_move(svc, h, "p", "in:inbox", [], ["INBOX"], "the archive")
+    assert r["changed"] == 2 and "INBOX" not in svc.labels["a"]
+    assert o.undo_last(svc, h, "p")["status"] == "undone" and "INBOX" in svc.labels["a"]
+
+
+def test_batches_over_a_thousand_are_split():
+    svc = ListSvc({f"m{i}": ["INBOX", "UNREAD"] for i in range(1200)})
+    o._batch(svc, {((), ("UNREAD",)): list(svc.labels)})
+    assert [len(c["ids"]) for c in svc.calls] == [1000, 200]
+
+
 if __name__ == "__main__":
     n = 0
     for name, fn in sorted(globals().items()):

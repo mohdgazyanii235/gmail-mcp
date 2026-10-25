@@ -12,6 +12,8 @@ import time
 
 SAFE_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 MAX_IDS = 25
+BULK_READ_CAP = 5000   # most messages "mark everything read" will touch in one go
+BULK_MOVE_CAP = 200    # most messages a query-based move will touch in one go
 KEEP_BATCHES = 50
 SPAM_WORDS = {"spam", "junk"}
 REFUSED_WORDS = {"trash", "bin", "deleted", "delete", "sent", "draft", "drafts", "chat", "scheduled", "important", "starred"}
@@ -112,8 +114,9 @@ def _groups(changes: list, reverse: bool) -> dict:
 
 def _batch(svc, groups: dict):
     for (add, rem), ids in groups.items():
-        svc.users().messages().batchModify(
-            userId="me", body={"ids": ids, "addLabelIds": list(add), "removeLabelIds": list(rem)}).execute()
+        for i in range(0, len(ids), 1000):  # Gmail's limit per call
+            svc.users().messages().batchModify(
+                userId="me", body={"ids": ids[i:i + 1000], "addLabelIds": list(add), "removeLabelIds": list(rem)}).execute()
 
 
 def apply_changes(svc, history: History, account: str, action: str, ids: list, add: list, remove: list) -> dict:
@@ -143,3 +146,57 @@ def undo_last(svc, history: History, account: str) -> dict:
     _batch(svc, _groups(batch["changes"], reverse=True))
     history.mark_undone(batch["id"])
     return {"status": "undone", "action": batch["action"], "messages": len(batch["changes"])}
+
+
+def list_ids(svc, query: str, cap: int) -> list:
+    """Message ids matching a Gmail search, newest first, up to cap."""
+    ids, token = [], None
+    while len(ids) < cap:
+        res = svc.users().messages().list(
+            userId="me", q=query, maxResults=min(500, cap - len(ids)), pageToken=token, includeSpamTrash=False).execute()
+        ids += [m["id"] for m in res.get("messages", [])]
+        token = res.get("nextPageToken")
+        if not token:
+            break
+    return ids[:cap]
+
+
+def _scope(query: str) -> str:
+    q = (query or "").strip()
+    if len(q) > 300 or any(ord(c) < 32 for c in q):
+        raise ValueError("That search is not usable.")
+    return q
+
+
+def bulk_mark_read(svc, history: History, account: str, query: str = "in:inbox", read: bool = True, cap: int = BULK_READ_CAP) -> dict:
+    """Mark everything matching a search as read (or unread). Only messages that are not already that way are touched,
+    all recorded as ONE batch, so undo_last restores the whole lot."""
+    cap = max(1, min(int(cap), BULK_READ_CAP))
+    q = f"({_scope(query) or 'in:inbox'}) " + ("is:unread" if read else "is:read")
+    ids = list_ids(svc, q, cap)
+    add, remove = ([], ["UNREAD"]) if read else (["UNREAD"], [])
+    changes = [{"id": i, "added": add, "removed": remove} for i in ids]
+    _batch(svc, _groups(changes, reverse=False))
+    if changes:
+        history.record(account, "mark read" if read else "mark unread", changes)
+    return {"status": "done", "action": "mark read" if read else "mark unread", "changed": len(ids),
+            "more_remaining": len(ids) >= cap}
+
+
+def bulk_move(svc, history: History, account: str, query: str, add: list, remove: list, nice: str, cap: int = BULK_MOVE_CAP) -> dict:
+    """Move everything matching a search (never an empty search). One undoable batch."""
+    q = _scope(query)
+    if not q:
+        raise ValueError("Say which mail to move, using a search such as 'from:newsletter@example.com in:inbox'.")
+    cap = max(1, min(int(cap), BULK_MOVE_CAP))
+    ids = list_ids(svc, q, cap)
+    changes = []
+    for mid in ids:
+        msg = svc.users().messages().get(userId="me", id=mid, format="minimal").execute()
+        a, r = diff(msg.get("labelIds", []), add, remove)
+        if a or r:
+            changes.append({"id": mid, "added": a, "removed": r})
+    _batch(svc, _groups(changes, reverse=False))
+    if changes:
+        history.record(account, f"move to {nice}", changes)
+    return {"status": "done", "action": f"move to {nice}", "changed": len(changes), "more_remaining": len(ids) >= cap}
