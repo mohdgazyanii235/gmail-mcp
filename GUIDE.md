@@ -278,3 +278,20 @@ You can now remove the Carly connector and any account you no longer want connec
 ## Bridge for Command Pi
 
 `bridge.py` is a small local service (127.0.0.1:8767, bearer `BRIDGE_TOKEN`) that lets Command Pi's sandboxed scripts work on mail without ever holding a Google login. It offers accounts, search, read, folders, mark read/unread (one message or a whole search, undoable as one batch), move (to INBOX, SPAM, ARCHIVE or your own folder) and undo. It has no send, no draft and no delete. Install with `./install-bridge.sh`, then run `sudo scripts/connect-bridge.sh` from the command-pi repo. Optional `BRIDGE_ACCOUNTS=personal,sales` limits mailboxes. Tests: `python3 test_organise.py && python3 test_bridge.py`.
+
+## Google Drive (read only)
+
+Jarvis can search and read the Drive of any account you connect, and can never change it: the sign-in only asks for the `drive.readonly` scope, and the server has no write tool. Drive logins are kept in `drive_tokens/`, separate from the Gmail logins in `tokens/`.
+
+One-off setup in Google Cloud (the same project as the Gmail client): turn on the **Google Drive API** (APIs and services, Library), and add the scope `.../auth/drive.readonly` to the OAuth consent screen. If the app is still in "Testing", each login expires after 7 days and has to be redone; publishing the app to "In production" (unverified is fine for your own accounts) avoids that.
+
+Then, for each account, with the SSH tunnel running as for Gmail:
+
+```
+.venv/bin/python manage_accounts.py add-drive sales
+.venv/bin/python manage_accounts.py add-drive bounty
+.venv/bin/python manage_accounts.py add-drive opal
+.venv/bin/python manage_accounts.py list          # shows "Drive: read only" per account
+```
+
+Then `pip install -r requirements.txt` and restart the Gmail server (`sudo systemctl restart gmail-mcp`, or whatever your unit is called) so the new tools appear. Remove one with `remove-drive <name>`.

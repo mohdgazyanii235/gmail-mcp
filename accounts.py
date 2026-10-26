@@ -9,6 +9,8 @@ BASE = Path(__file__).resolve().parent
 TOKENS = BASE / "tokens"
 CLIENT_SECRET = BASE / "client_secret.json"
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]  # read only: Google itself refuses any change
+DRIVE_TOKENS = BASE / "drive_tokens"  # separate from the Gmail logins, so adding or removing one never touches the other
 ALIAS_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 
@@ -62,3 +64,47 @@ def get_service(alias: str):
         write_info(alias, info)
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     return service, info.get("email", "")
+
+
+# --- Google Drive (read only) -------------------------------------------------
+
+def drive_token_path(alias: str) -> Path:
+    return DRIVE_TOKENS / f"{check_alias(alias)}.json"
+
+
+def list_drive_aliases() -> list:
+    return sorted(p.stem for p in DRIVE_TOKENS.glob("*.json")) if DRIVE_TOKENS.exists() else []
+
+
+def read_drive_info(alias: str) -> dict:
+    path = drive_token_path(alias)
+    if not path.exists():
+        known = ", ".join(list_drive_aliases()) or "none set up yet"
+        raise ValueError(f"Drive is not connected for '{alias}'. Accounts with Drive: {known}.")
+    return json.loads(path.read_text())
+
+
+def write_drive_info(alias: str, info: dict) -> None:
+    DRIVE_TOKENS.mkdir(mode=0o700, exist_ok=True)
+    path = drive_token_path(alias)
+    tmp = path.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(info, f)
+    os.replace(tmp, path)
+    os.chmod(path, 0o600)
+
+
+def get_drive_service(alias: str):
+    """Return (drive_service, account_email). Refreshes and re-saves the login when needed."""
+    from google.auth.transport.requests import Request
+    from google.oauth2.credentials import Credentials
+    from googleapiclient.discovery import build
+
+    info = read_drive_info(alias)
+    creds = Credentials.from_authorized_user_info(info, DRIVE_SCOPES)
+    if not creds.valid:
+        creds.refresh(Request())
+        info.update(json.loads(creds.to_json()))
+        write_drive_info(alias, info)
+    return build("drive", "v3", credentials=creds, cache_discovery=False), info.get("email", "")
