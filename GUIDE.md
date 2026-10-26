@@ -281,17 +281,39 @@ You can now remove the Carly connector and any account you no longer want connec
 
 ## Google Drive (read only)
 
-Jarvis can search and read the Drive of any account you connect, and can never change it: the sign-in only asks for the `drive.readonly` scope, and the server has no write tool. Drive logins are kept in `drive_tokens/`, separate from the Gmail logins in `tokens/`.
+Jarvis can search and read the Drive of any account you connect, and can never change it: the sign-in only asks for Google's view-only permission (`drive.readonly`), and the server has no write tool. Drive logins are kept in `drive_tokens/`, separate from the Gmail logins in `tokens/`.
 
-One-off setup in Google Cloud (the same project as the Gmail client): turn on the **Google Drive API** (APIs and services, Library), and add the scope `.../auth/drive.readonly` to the OAuth consent screen. If the app is still in "Testing", each login expires after 7 days and has to be redone; publishing the app to "In production" (unverified is fine for your own accounts) avoids that.
+### A. Google Cloud, on your laptop (once)
 
-Then, for each account, with the SSH tunnel running as for Gmail:
+1. Go to https://console.cloud.google.com and sign in with the Google account that owns the `pi-gmail` project. Check that `pi-gmail` is shown in the project picker at the top.
+2. Open https://console.cloud.google.com/apis/library/drive.googleapis.com and click **Enable**.
+3. Open the main menu, choose **Google Auth Platform**, then **Data Access**.
+4. Click **Add or remove scopes**. In the box for manually adding scopes paste `https://www.googleapis.com/auth/drive.readonly`, click **Add to table**, then **Update**, then **Save**. Keep the Gmail scope that is already there.
+5. Open **Audience** and check the status says **In production**. If it says Testing, click **Publish app** and confirm (Testing logins expire after 7 days).
+6. If any of the accounts is a Google Workspace account (opalnoak.co.uk, sanyang.co.uk, thebountyregister.com) and someone else administers it, they must allow the app's Drive access too (admin.google.com, Security, Access and data control, API controls, Manage third-party app access).
 
-```
-.venv/bin/python manage_accounts.py add-drive sales
-.venv/bin/python manage_accounts.py add-drive bounty
-.venv/bin/python manage_accounts.py add-drive opal
-.venv/bin/python manage_accounts.py list          # shows "Drive: read only" per account
-```
+### B. Update the Pi
 
-Then `pip install -r requirements.txt` and restart the Gmail server (`sudo systemctl restart gmail-mcp`, or whatever your unit is called) so the new tools appear. Remove one with `remove-drive <name>`.
+1. On your laptop open a terminal and run `ssh USER@gmailpi.local`.
+2. Run `cd ~/gmail-mcp && git pull`. It should list `drivelib.py` among the changed files.
+3. Run `.venv/bin/pip install -r requirements.txt`.
+4. Run `.venv/bin/python manage_accounts.py list` and note the names (for example `opal`, `bounty`, `sanyang` or `sales`). Use exactly those names below.
+
+### C. Sign in to Drive, once per account
+
+1. Open a second terminal on your laptop and run `ssh -L 8080:localhost:8080 USER@gmailpi.local`. Leave it open.
+2. In that terminal run `cd ~/gmail-mcp && .venv/bin/python manage_accounts.py add-drive NAME`, using the first name from step B4.
+3. Copy the long link it prints into a private browser window on your laptop.
+4. Sign in with the Google account that belongs to that name. Click **Advanced**, then **Go to Pi Gmail (unsafe)**. Tick the box allowing Google Drive viewing and click **Continue**.
+5. The browser says "All done" and the terminal says `Saved read-only Drive access for 'NAME'`.
+6. Repeat steps 2 to 5 for each of the other two accounts.
+7. Run `.venv/bin/python manage_accounts.py list`. Each of the three should say `Drive: read only`.
+
+### D. Restart and test
+
+1. `sudo systemctl restart gmail-mcp`, then `sudo systemctl status gmail-mcp --no-pager`, which should say active (running).
+2. Close the tunnel terminal.
+3. `cd ~/pi-jarvis && ./scripts/update.sh`.
+4. Say: "Jarvis, which Google Drives can you see?" then "search the sales drive for wholesale".
+
+If Jarvis says Drive is not connected, check step C7. If Google says "access not configured", the Drive API from step A2 is not enabled yet. Remove one account's Drive access with `manage_accounts.py remove-drive NAME`.
