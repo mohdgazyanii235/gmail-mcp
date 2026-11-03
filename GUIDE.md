@@ -198,7 +198,7 @@ Signing in needs a browser, and the Pi has none, so you borrow your laptop's thr
 2. Name: `Gmail (Pi)`. URL: paste the address from Part 7. Leave any optional OAuth client ID and secret fields empty; the server registers Claude automatically. Click **Add**, then **Connect**.
 3. A sign-in page from your Pi opens. Check the address bar shows your `ts.net` name, then enter your password and the current 6-digit code from your authenticator and press **Sign in**. You land back in Claude with the connector connected.
 4. Start a new chat, enable the connector from the tools menu, and ask: *"List my Gmail accounts."* You should see your four names and addresses. Then try: *"Search the opal account for unread mail from the last 3 days."*
-5. In the connector's settings, if your Claude offers per-tool permissions, set the read tools (`list_accounts`, `search_messages`, `read_message`, `read_thread`) and the two draft tools to **Always allow**, and set `send_message`, `send_reply` and `send_draft` to **Needs approval**. Claude will then ask you before every send.
+5. In the connector's settings, if your Claude offers per-tool permissions, set the read tools (`list_accounts`, `list_send_as`, `search_messages`, `read_message`, `read_thread`) and the two draft tools to **Always allow**, and set `send_message`, `send_reply` and `send_draft` to **Needs approval**. Claude will then ask you before every send.
 6. Final test: ask Claude to *"Create a draft reply on the Gemma Briggs thread in my personal account"*, then open Gmail and check that the draft is sitting inside that conversation. Only after that, try a real send, to yourself first.
 
 You can now remove the Carly connector and any account you no longer want connected.
@@ -317,3 +317,7 @@ Jarvis can search and read the Drive of any account you connect, and can never c
 4. Say: "Jarvis, which Google Drives can you see?" then "search the sales drive for wholesale".
 
 If Jarvis says Drive is not connected, check step C7. If Google says "access not configured", the Drive API from step A2 is not enabled yet. Remove one account's Drive access with `manage_accounts.py remove-drive NAME`.
+
+## Sending from an alias
+
+The send and draft tools take an optional `from_address`. It must be one of the account's verified "Send mail as" addresses (Gmail Settings > Accounts > Send mail as); `list_send_as` shows them. Anything else is refused with the list of usable addresses. Leave it out to send from the account's own address. To pick this up on the Pi: `cd ~/gmail-mcp && git pull && sudo systemctl restart gmail-mcp`, then reconnect or refresh the connector in Claude so it sees the new option.

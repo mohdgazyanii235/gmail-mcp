@@ -131,7 +131,15 @@ def _attach_note(items) -> str:
     return ", ".join(f"{n} ({len(d) // 1024} KB)" for n, _, d in items)
 
 
-def _prepare_reply(svc, my_email: str, message_id: str, body: str, reply_all: bool, cc, files=None):
+def _from_header(svc, from_address: Optional[str]) -> str:
+    """'' for the account's own address, otherwise the checked From header for a verified send-as alias."""
+    if not from_address:
+        return ""
+    send_as = svc.users().settings().sendAs().list(userId="me").execute().get("sendAs", [])
+    return mailutil.pick_send_as(send_as, from_address)
+
+
+def _prepare_reply(svc, my_email: str, message_id: str, body: str, reply_all: bool, cc, files=None, from_addr: str = ""):
     orig = svc.users().messages().get(
         userId="me", id=message_id, format="metadata",
         metadataHeaders=["From", "To", "Cc", "Reply-To", "Subject", "Message-ID", "References"],
@@ -143,7 +151,7 @@ def _prepare_reply(svc, my_email: str, message_id: str, body: str, reply_all: bo
     raw = mailutil.build_raw_message(
         to=to, subject=subject, body=body, cc=cc_all or None,
         in_reply_to=mailutil.header(h, "Message-ID"), references=mailutil.header(h, "References"),
-        attachments=files,
+        attachments=files, from_addr=from_addr,
     )
     return raw, orig.get("threadId", ""), to, cc_all, subject
 
@@ -161,6 +169,18 @@ def list_accounts() -> list[dict]:
             email = "(unreadable)"
         out.append({"account": alias, "email": email})
     return out
+
+
+@mcp.tool(annotations=READ)
+@friendly
+def list_send_as(account: str) -> list[dict]:
+    """List the addresses this account can send from (its own address plus verified send-as aliases).
+    Pass one as 'from_address' to the send and draft tools."""
+    svc, _ = accounts.get_service(account)
+    rows = svc.users().settings().sendAs().list(userId="me").execute().get("sendAs", [])
+    return [{"email": r.get("sendAsEmail", ""), "display_name": r.get("displayName", ""),
+             "primary": bool(r.get("isPrimary")), "verified": bool(r.get("isPrimary")) or r.get("verificationStatus") == "accepted"}
+            for r in rows]
 
 
 @mcp.tool(annotations=READ)
@@ -301,14 +321,18 @@ def undo_last_change(account: str) -> dict:
 @friendly
 def create_draft(account: str, to: list[str], subject: str, body: str,
                  cc: Optional[list[str]] = None, bcc: Optional[list[str]] = None,
-                 attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None) -> dict:
+                 attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None,
+                 from_address: Optional[str] = None) -> dict:
     """Save a new plain-text draft in the account's Drafts folder, optionally with attachments. Nothing is sent.
     Attachments: 'attachments' is a list of {filename, content_base64, mime_type (optional)} for small files you can supply
     yourself (a few hundred KB at most is practical). 'forward_attachments' is a list of {message_id, filename} to attach files that
-    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB."""
+    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB.
+    'from_address' (optional) sends as one of the account's verified send-as aliases (see list_send_as); leave it out to use
+    the account's own address."""
     svc, _ = accounts.get_service(account)
     files = _gather_attachments(svc, attachments, forward_attachments)
-    raw = mailutil.build_raw_message(to, subject, body, cc, bcc, attachments=files)
+    raw = mailutil.build_raw_message(to, subject, body, cc, bcc, attachments=files,
+                                     from_addr=_from_header(svc, from_address))
     d = svc.users().drafts().create(userId="me", body={"message": {"raw": raw}}).execute()
     return {"draft_id": d["id"], "message_id": d.get("message", {}).get("id", ""), "status": "draft saved, not sent",
             "attached": _attach_note(files)}
@@ -318,15 +342,19 @@ def create_draft(account: str, to: list[str], subject: str, body: str,
 @friendly
 def create_reply_draft(account: str, message_id: str, body: str, reply_all: bool = False,
                        cc: Optional[list[str]] = None,
-                       attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None) -> dict:
+                       attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None,
+                 from_address: Optional[str] = None) -> dict:
     """Save a draft reply inside the existing conversation (same thread, 'Re:' subject, correct recipients). Nothing is sent.
     'message_id' is the id of the message being replied to. Add extra people with 'cc'.
     Attachments: 'attachments' is a list of {filename, content_base64, mime_type (optional)} for small files you can supply
     yourself (a few hundred KB at most is practical). 'forward_attachments' is a list of {message_id, filename} to attach files that
-    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB."""
+    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB.
+    'from_address' (optional) sends as one of the account's verified send-as aliases (see list_send_as); leave it out to use
+    the account's own address."""
     svc, email = accounts.get_service(account)
     files = _gather_attachments(svc, attachments, forward_attachments)
-    raw, thread_id, to, cc_all, subject = _prepare_reply(svc, email, message_id, body, reply_all, cc, files)
+    raw, thread_id, to, cc_all, subject = _prepare_reply(svc, email, message_id, body, reply_all, cc, files,
+                                                              _from_header(svc, from_address))
     d = svc.users().drafts().create(userId="me", body={"message": {"raw": raw, "threadId": thread_id}}).execute()
     return {"draft_id": d["id"], "thread_id": thread_id, "to": to, "cc": cc_all, "subject": subject,
             "status": "draft saved, not sent", "attached": _attach_note(files)}
@@ -338,16 +366,20 @@ def create_reply_draft(account: str, message_id: str, body: str, reply_all: bool
 @friendly
 def send_message(account: str, to: list[str], subject: str, body: str,
                  cc: Optional[list[str]] = None, bcc: Optional[list[str]] = None,
-                 attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None) -> dict:
+                 attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None,
+                 from_address: Optional[str] = None) -> dict:
     """SEND a new plain-text email from the chosen account, optionally with attachments. This cannot be undone. Only use when the
     user has clearly asked to send.
     Attachments: 'attachments' is a list of {filename, content_base64, mime_type (optional)} for small files you can supply
     yourself (a few hundred KB at most is practical). 'forward_attachments' is a list of {message_id, filename} to attach files that
-    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB."""
+    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB.
+    'from_address' (optional) sends as one of the account's verified send-as aliases (see list_send_as); leave it out to use
+    the account's own address."""
     _require_send()
     svc, _ = accounts.get_service(account)
     files = _gather_attachments(svc, attachments, forward_attachments)
-    raw = mailutil.build_raw_message(to, subject, body, cc, bcc, attachments=files)
+    raw = mailutil.build_raw_message(to, subject, body, cc, bcc, attachments=files,
+                                     from_addr=_from_header(svc, from_address))
     sent = svc.users().messages().send(userId="me", body={"raw": raw}).execute()
     _log_send(account, to, subject, sent.get("threadId", ""))
     return {"status": "sent", "message_id": sent["id"], "thread_id": sent.get("threadId", ""), "attached": _attach_note(files)}
@@ -357,16 +389,20 @@ def send_message(account: str, to: list[str], subject: str, body: str,
 @friendly
 def send_reply(account: str, message_id: str, body: str, reply_all: bool = False,
                cc: Optional[list[str]] = None,
-               attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None) -> dict:
+               attachments: Optional[list[dict]] = None, forward_attachments: Optional[list[dict]] = None,
+                 from_address: Optional[str] = None) -> dict:
     """SEND a reply inside the existing conversation, optionally with attachments. This cannot be undone. Only use when the user has
     clearly asked to send. 'message_id' is the id of the message being replied to.
     Attachments: 'attachments' is a list of {filename, content_base64, mime_type (optional)} for small files you can supply
     yourself (a few hundred KB at most is practical). 'forward_attachments' is a list of {message_id, filename} to attach files that
-    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB."""
+    already sit in the account's mailbox, found with read_message; use it for anything large. Total limit about 18 MB.
+    'from_address' (optional) sends as one of the account's verified send-as aliases (see list_send_as); leave it out to use
+    the account's own address."""
     _require_send()
     svc, email = accounts.get_service(account)
     files = _gather_attachments(svc, attachments, forward_attachments)
-    raw, thread_id, to, cc_all, subject = _prepare_reply(svc, email, message_id, body, reply_all, cc, files)
+    raw, thread_id, to, cc_all, subject = _prepare_reply(svc, email, message_id, body, reply_all, cc, files,
+                                                              _from_header(svc, from_address))
     sent = svc.users().messages().send(userId="me", body={"raw": raw, "threadId": thread_id}).execute()
     _log_send(account, to + cc_all, subject, thread_id)
     return {"status": "sent", "message_id": sent["id"], "thread_id": thread_id, "to": to, "cc": cc_all, "subject": subject,
