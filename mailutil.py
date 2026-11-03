@@ -162,17 +162,21 @@ def build_raw_message(
     in_reply_to: str = "",
     references: str = "",
     attachments=None,
+    from_addr: str = "",
 ) -> str:
     """Build an email (plain text, optional attachments) and return it base64url-encoded for the Gmail API.
-    'attachments' is a list of (filename, mime_type, bytes)."""
+    'attachments' is a list of (filename, mime_type, bytes). 'from_addr' sets the From header (a verified send-as
+    alias); leave it empty and Gmail uses the account's own address."""
     raw_addrs = []
     for v in (to, cc, bcc):
         raw_addrs += [v] if isinstance(v, str) else list(v or [])
-    _guard_header_injection(subject, in_reply_to, references, *raw_addrs)
+    _guard_header_injection(subject, in_reply_to, references, from_addr, *raw_addrs)
     to_l, cc_l, bcc_l = _clean_list(to), _clean_list(cc), _clean_list(bcc)
     if not to_l:
         raise ValueError("At least one recipient is required.")
     msg = EmailMessage()
+    if from_addr:
+        msg["From"] = from_addr
     msg["To"] = ", ".join(to_l)
     if cc_l:
         msg["Cc"] = ", ".join(cc_l)
@@ -214,3 +218,15 @@ def reply_recipients(headers: list, my_email: str, reply_all: bool = False):
     if not to:  # replying to a message you sent yourself: keep the original recipients
         to = [formataddr(p) for p in getaddresses([header(headers, "To")]) if p[1]]
     return to, cc
+
+
+def pick_send_as(send_as: list, wanted: str) -> str:
+    """Return the From header for 'wanted' if it is one of the account's usable send-as addresses, else raise.
+    'send_as' is the Gmail API sendAs list. An alias is usable when it is the primary address or Gmail has verified it."""
+    want = parseaddr(wanted or "")[1].strip().lower()
+    usable = [s for s in send_as or [] if s.get("isPrimary") or s.get("verificationStatus") == "accepted"]
+    for s in usable:
+        if s.get("sendAsEmail", "").lower() == want:
+            return formataddr((s.get("displayName", ""), s["sendAsEmail"])) if s.get("displayName") else s["sendAsEmail"]
+    allowed = ", ".join(s.get("sendAsEmail", "") for s in usable) or "none"
+    raise ValueError(f"'{wanted}' is not a verified send-as address on this account. Usable: {allowed}.")

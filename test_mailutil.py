@@ -172,6 +172,34 @@ def test_b64_roundtrip_unpadded():
         assert m.b64url_decode(m.b64url_encode(s).rstrip("=")) == s
 
 
+def test_from_alias_header():
+    msg = parse(m.build_raw_message("a@x.com", "Hi", "body", from_addr='"Sanyang UAE" <sales@sanyang.ae>'))
+    assert msg["From"] == '"Sanyang UAE" <sales@sanyang.ae>' or msg["From"] == "Sanyang UAE <sales@sanyang.ae>"
+    assert "From" not in parse(m.build_raw_message("a@x.com", "Hi", "body"))
+    try:
+        m.build_raw_message("a@x.com", "Hi", "body", from_addr="x@y.com\r\nBcc: evil@z.com")
+        assert False, "header injection in From should be blocked"
+    except ValueError:
+        pass
+
+
+def test_pick_send_as():
+    send_as = [
+        {"sendAsEmail": "sales@sanyang.co.uk", "displayName": "Sanyang Cabinetry UK", "isPrimary": True},
+        {"sendAsEmail": "sales@sanyang.ae", "displayName": "Sanyang UAE", "verificationStatus": "accepted"},
+        {"sendAsEmail": "pending@x.com", "verificationStatus": "pending"},
+    ]
+    assert m.pick_send_as(send_as, "Sales@Sanyang.ae") == "Sanyang UAE <sales@sanyang.ae>"
+    assert m.pick_send_as(send_as, "sales@sanyang.co.uk") == "Sanyang Cabinetry UK <sales@sanyang.co.uk>"
+    for bad in ["pending@x.com", "other@x.com"]:
+        try:
+            m.pick_send_as(send_as, bad)
+            assert False, bad
+        except ValueError as e:
+            usable = str(e).split("Usable:")[1]
+            assert "sales@sanyang.ae" in usable and "pending@x.com" not in usable
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
