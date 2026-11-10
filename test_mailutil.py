@@ -200,6 +200,26 @@ def test_pick_send_as():
             assert "sales@sanyang.ae" in usable and "pending@x.com" not in usable
 
 
+
+
+def test_html_alternative():
+    msg = parse(m.build_raw_message("a@x.com", "Hi", "Plain words", html_body="<p>Rich <b>words</b></p><img src='https://x/logo.png'>"))
+    assert msg.get_content_type() == "multipart/alternative"
+    parts = {p.get_content_type(): p.get_content() for p in msg.iter_parts()}
+    assert "Plain words" in parts["text/plain"]
+    assert "<b>words</b>" in parts["text/html"]
+    assert parse(m.build_raw_message("a@x.com", "Hi", "body")).get_content_type() == "text/plain"
+
+
+def test_html_with_attachment():
+    files = [("note.txt", "text/plain", b"hello")]
+    msg = parse(m.build_raw_message("a@x.com", "Hi", "Plain", html_body="<p>Rich</p>", attachments=files))
+    assert msg.get_content_type() == "multipart/mixed"
+    types = [p.get_content_type() for p in msg.walk()]
+    assert "text/html" in types and "text/plain" in types
+    assert any(p.get_filename() == "note.txt" for p in msg.walk())
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
