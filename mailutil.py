@@ -163,10 +163,12 @@ def build_raw_message(
     references: str = "",
     attachments=None,
     from_addr: str = "",
+    html_body: str = "",
 ) -> str:
-    """Build an email (plain text, optional attachments) and return it base64url-encoded for the Gmail API.
-    'attachments' is a list of (filename, mime_type, bytes). 'from_addr' sets the From header (a verified send-as
-    alias); leave it empty and Gmail uses the account's own address."""
+    """Build an email (plain text, optional HTML version, optional attachments) and return it base64url-encoded for the
+    Gmail API. 'attachments' is a list of (filename, mime_type, bytes). 'from_addr' sets the From header (a verified send-as
+    alias); leave it empty and Gmail uses the account's own address. 'html_body' adds an HTML version (for example with an
+    email signature and logo); mail apps show it and fall back to 'body' as plain text."""
     raw_addrs = []
     for v in (to, cc, bcc):
         raw_addrs += [v] if isinstance(v, str) else list(v or [])
@@ -187,6 +189,8 @@ def build_raw_message(
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = (references + " " + in_reply_to).strip() if references else in_reply_to
     msg.set_content(body)
+    if html_body:
+        msg.add_alternative(html_body, subtype="html")
     total = 0
     for filename, mime, data in attachments or []:
         total += len(data)
